@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/golang/glog"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/kubernetes/pkg/util/keymutex"
 )
@@ -46,17 +47,29 @@ const (
 )
 
 type rbdVolume struct {
-	VolName     string `json:"volName"`
-	VolID       string `json:"volID"`
-	Monitors    string `json:"monitors"`
-	Pool        string `json:"pool"`
-	ImageFormat string `json:"imageFormat"`
-	// TODO (sbezverk) check if it is used and how
-	ImageFeatures []string `json:"imageFeatures"`
-	VolSize       int64    `json:"volSize"`
+	VolName       string `json:"volName"`
+	VolID         string `json:"volID"`
+	Monitors      string `json:"monitors"`
+	Pool          string `json:"pool"`
+	ImageFormat   string `json:"imageFormat"`
+	ImageFeatures string `json:"imageFeatures"`
+	VolSize       int64  `json:"volSize"`
 }
 
-var attachdetachMutex = keymutex.NewKeyMutex()
+var (
+	attachdetachMutex = keymutex.NewKeyMutex()
+	supportedFeatures = sets.NewString("layering")
+)
+
+type rbdSnapshot struct {
+	SourceVolumeID string `json:"sourceVolumeID"`
+	VolName        string `json:"volName"`
+	SnapName       string `json:"snapName"`
+	SnapID         string `json:"sanpID"`
+	Monitors       string `json:"monitors"`
+	Pool           string `json:"pool"`
+	//	SizeBytes
+}
 
 func getRBDKey(id string, credentials map[string]string) (string, error) {
 
@@ -87,10 +100,7 @@ func createRBDImage(pOpts *rbdVolume, volSz int, credentials map[string]string) 
 	}
 	args := []string{"create", image, "--size", volSzGB, "--pool", pOpts.Pool, "--id", RBDUserID, "-m", mon, "--key=" + key, "--image-format", pOpts.ImageFormat}
 	if pOpts.ImageFormat == rbdImageFormat2 {
-		// if no image features is provided, it results in empty string
-		// which disable all RBD image format 2 features as we expected
-		features := strings.Join(pOpts.ImageFeatures, ",")
-		args = append(args, "--image-feature", features)
+		args = append(args, "--image-feature", pOpts.ImageFeatures)
 	}
 	output, err = execCommand("rbd", args)
 
@@ -187,7 +197,24 @@ func getRBDVolumeOptions(volOptions map[string]string) (*rbdVolume, error) {
 	}
 	rbdVol.ImageFormat, ok = volOptions["imageFormat"]
 	if !ok {
-		rbdVol.ImageFormat = "2"
+		rbdVol.ImageFormat = rbdImageFormat2
+	}
+	if rbdVol.ImageFormat == rbdImageFormat2 {
+		// if no image features is provided, it results in empty string
+		// which disable all RBD image format 2 features as we expected
+		imageFeatures, ok = volOptions["imageFeatures"]
+		if !ok {
+			rbdVol.ImageFeatures = ""
+		}
+
+		arr := strings.Split(imageFeatures, ",")
+		for _, f := range arr {
+			if !supportedFeatures.Has(f) {
+				return nil, fmt.Errorf("invalid feature %q for volume plugin %s, supported features are: %v", f, r.plugin.GetPluginName(), supportedFeatures)
+			}
+		}
+
+		rbdVol.ImageFeatures = volOptions["imageFeatures"]
 	}
 
 	return rbdVol, nil
